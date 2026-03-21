@@ -23,17 +23,13 @@
 
 ## 页面预览
 
-截图目录建议放在 `docs/screenshots/` 下，例如：
+### 首页概览
 
-- `docs/screenshots/home.png`
-- `docs/screenshots/panel.png`
-
-截图放入仓库后，可以在这里直接展示：
-
-```md
 ![首页预览](docs/screenshots/home.png)
+
+### 抽奖与名单视图
+
 ![抽奖与名单预览](docs/screenshots/panel.png)
-```
 
 ## 技术栈
 
