@@ -9,12 +9,17 @@ import {
   getDynamicProbability,
   getRemainingSlots,
   getSelectedStudents,
-  parseBulkInput,
+  parseStudentIdLines,
   resetSelections,
 } from './lottery'
 
 describe('lottery utils', () => {
-  it('computes a dynamic probability from remaining slots and attempts', () => {
+  it('uses 100 percent probability when registered students are within the slot count', () => {
+    const students = createSampleStudents(WINNER_TARGET)
+    expect(getDynamicProbability(students)).toBe(1)
+  })
+
+  it('computes a dynamic probability from remaining slots and remaining attempts above the slot count', () => {
     const students = createSampleStudents(100)
     expect(getDynamicProbability(students)).toBe(WINNER_TARGET / (100 * DEFAULT_CHANCES))
   })
@@ -42,10 +47,9 @@ describe('lottery utils', () => {
     expect(getRemainingSlots(students)).toBe(WINNER_TARGET)
   })
 
-  it('parses bulk input lines with comma or tab', () => {
-    const result = parseBulkInput('张三,20260001\n李四\t20260002\thttps://example.com/a.png')
-    expect(result).toHaveLength(2)
-    expect(result[1]?.avatarUrl).toContain('example.com')
+  it('parses one student id per line for the whitelist', () => {
+    const result = parseStudentIdLines('20260001\n20260002\n\n20260003')
+    expect(result).toEqual(['20260001', '20260002', '20260003'])
   })
 
   it('resets selections and attempts cleanly', () => {

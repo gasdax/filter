@@ -1,7 +1,7 @@
 import type { DrawResult, Student } from '../types'
 
 export const WINNER_TARGET = 35
-export const DEFAULT_CHANCES = 10
+export const DEFAULT_CHANCES = 20
 
 const ENCOURAGEMENT_MESSAGES = [
   '这次星轨偏了一点点，下次更接近金光。',
@@ -13,6 +13,7 @@ const ENCOURAGEMENT_MESSAGES = [
 export function normalizeStudent(input: {
   name: string
   studentId: string
+  phoneNumber: string
   avatarUrl?: string
 }): Student {
   const name = input.name.trim()
@@ -22,6 +23,7 @@ export function normalizeStudent(input: {
     id: `${studentId}-${Math.random().toString(36).slice(2, 8)}`,
     name,
     studentId,
+    phoneNumber: input.phoneNumber.trim(),
     avatarUrl: input.avatarUrl?.trim() ?? '',
     chances: DEFAULT_CHANCES,
     attemptsUsed: 0,
@@ -73,6 +75,10 @@ export function canStudentDraw(student: Student | null, students: Student[]): bo
 }
 
 export function getDynamicProbability(students: Student[]): number {
+  if (students.length <= WINNER_TARGET && students.length > 0) {
+    return 1
+  }
+
   const remainingSlots = getRemainingSlots(students)
   const remainingAttemptPool = getRemainingAttemptPool(students)
 
@@ -146,4 +152,11 @@ export function parseBulkInput(raw: string): Array<{ name: string; studentId: st
       }
     })
     .filter((item) => item.name && item.studentId)
+}
+
+export function parseStudentIdLines(raw: string): string[] {
+  return raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
 }

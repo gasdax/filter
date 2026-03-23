@@ -41,6 +41,10 @@ textarea {
   font: inherit;
 }
 
+small {
+  color: var(--muted);
+}
+
 button {
   cursor: pointer;
 }
@@ -54,6 +58,54 @@ button {
   width: min(var(--content-width), calc(100vw - 32px));
   margin: 0 auto;
   padding: 28px 0 40px;
+}
+
+.app-shell.is-register-flow {
+  width: min(1180px, calc(100vw - 32px));
+}
+
+.register-page {
+  min-height: calc(100vh - 68px);
+  display: grid;
+  place-items: center;
+}
+
+.admin-page {
+  display: grid;
+  gap: 24px;
+}
+
+.register-hero {
+  width: 100%;
+  padding: 34px;
+  display: grid;
+  gap: 28px;
+  grid-template-columns: 1.1fr 0.9fr;
+  align-items: start;
+}
+
+.register-card,
+.register-result-shell {
+  padding: 28px;
+  border-radius: 28px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(99, 157, 255, 0.08));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.register-result-shell {
+  width: min(720px, 100%);
+}
+
+.register-result-shell.is-success {
+  box-shadow: 0 0 50px rgba(246, 208, 124, 0.1);
+}
+
+.register-result-shell.is-fail {
+  box-shadow: 0 0 50px rgba(255, 128, 128, 0.1);
+}
+
+.compact-stats {
+  margin-top: 22px;
 }
 
 .cinematic-overlay {
@@ -81,6 +133,7 @@ button {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  object-position: center;
   background: #000;
 }
 
@@ -179,6 +232,74 @@ button {
   margin-top: 18px;
   color: #2563eb;
   font-size: 22px;
+}
+
+.register-overlay {
+  display: grid;
+  place-items: center;
+}
+
+.register-overlay-panel {
+  position: relative;
+  width: min(460px, calc(100vw - 32px));
+  padding: 34px 28px;
+  border-radius: 30px;
+  overflow: hidden;
+  text-align: center;
+  background:
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.24), transparent 36%),
+    linear-gradient(180deg, rgba(14, 28, 48, 0.96), rgba(8, 16, 29, 0.98));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.36);
+  animation: overlay-card-in 0.45s ease forwards;
+}
+
+.register-overlay.is-success .register-overlay-panel {
+  border-color: rgba(246, 208, 124, 0.42);
+}
+
+.register-overlay.is-fail .register-overlay-panel {
+  border-color: rgba(255, 128, 128, 0.42);
+}
+
+.register-icon {
+  position: relative;
+  z-index: 1;
+  width: 92px;
+  height: 92px;
+  margin: 0 auto 18px;
+  border-radius: 28px;
+  display: grid;
+  place-items: center;
+  font-size: 32px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.register-overlay.is-success .register-icon {
+  background: linear-gradient(135deg, rgba(246, 208, 124, 0.24), rgba(255, 239, 191, 0.42));
+  color: var(--gold-strong);
+}
+
+.register-overlay.is-fail .register-icon {
+  background: linear-gradient(135deg, rgba(255, 128, 128, 0.2), rgba(255, 177, 177, 0.34));
+  color: #ffd6d6;
+}
+
+.register-burst {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: 320px;
+  height: 320px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%) scale(0.3);
+  opacity: 0;
+  border: 2px solid rgba(255, 255, 255, 0.14);
+  animation: register-burst 1.4s ease-out infinite;
+}
+
+.register-burst-delay {
+  animation-delay: 0.42s;
 }
 
 .hero-panel,
@@ -504,12 +625,43 @@ textarea {
 }
 
 .winner-list,
-.student-grid {
+.student-grid,
+.admin-student-list {
   display: grid;
   gap: 12px;
   max-height: 680px;
   overflow: auto;
   padding-right: 4px;
+}
+
+.admin-student-card {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  border-radius: 18px;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.admin-student-main {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+}
+
+.admin-student-actions {
+  display: grid;
+  gap: 10px;
+  min-width: 180px;
+}
+
+.admin-student-actions label {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
 }
 
 .winner-item,
@@ -574,6 +726,14 @@ textarea {
   margin-top: 18px;
 }
 
+.top-gap {
+  margin-top: 18px;
+}
+
+.field-hint {
+  margin-top: -2px;
+}
+
 .player-card,
 .latest-winner {
   display: grid;
@@ -628,7 +788,19 @@ textarea {
   }
 }
 
+@keyframes register-burst {
+  0% {
+    opacity: 0.6;
+    transform: translate(-50%, -50%) scale(0.3);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.2);
+  }
+}
+
 @media (max-width: 1080px) {
+  .register-hero,
   .hero-panel,
   .main-grid,
   .results-grid {
@@ -648,6 +820,10 @@ textarea {
     border-radius: 24px;
   }
 
+  .register-hero {
+    padding: 18px;
+  }
+
   .stats-grid {
     grid-template-columns: 1fr 1fr;
   }
@@ -659,6 +835,14 @@ textarea {
   .result-card {
     min-height: 250px;
     padding: 18px;
+  }
+
+  .admin-student-card {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-student-actions {
+    min-width: 0;
   }
 
   .placeholder-copy p,

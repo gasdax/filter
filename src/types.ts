@@ -2,6 +2,7 @@ export type Student = {
   id: string
   name: string
   studentId: string
+  phoneNumber: string
   avatarUrl: string
   chances: number
   attemptsUsed: number

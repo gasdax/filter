@@ -1,70 +1,124 @@
-import express from 'express'
-import fs from 'node:fs'
-import path from 'node:path'
 import crypto from 'node:crypto'
+import fs from 'node:fs'
+import fsp from 'node:fs/promises'
+import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import express from 'express'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
+
 const DB_PATH = path.join(__dirname, 'server-db.json')
 const PORT = 4174
 const WINNER_TARGET = 35
-const DEFAULT_CHANCES = 10
+const DEFAULT_CHANCES = 20
 const ADMIN_PASSWORD = 'admin2026'
 
-const FAMILY_NAMES = ['赵', '钱', '孙', '李', '周', '吴', '郑', '王', '冯', '陈', '褚', '卫', '蒋', '沈', '韩', '杨', '朱', '秦', '尤', '许']
-const GIVEN_NAMES = ['子涵', '雨桐', '宇轩', '思远', '嘉宁', '晨曦', '梓航', '可欣', '浩然', '芷晴', '昊天', '一诺', '书瑶', '嘉懿', '奕辰', '俊熙', '清妍', '沐宸', '知夏', '星野']
-
-const ENCOURAGEMENT_MESSAGES = [
-  '这次星轨偏了一点点，下次更接近金光。',
-  '今天的运气正在蓄力，继续加油。',
-  '差一点点，下一抽说不定就会闪耀。',
-  '星辉还在汇聚，别急，继续冲。',
-]
-
 const sessions = new Map()
+let db = null
+let saveTimer = null
+let saveInFlight = Promise.resolve()
+let mutationQueue = Promise.resolve()
 
-function createSampleStudents(count = 240) {
-  return Array.from({ length: count }, (_, index) => {
-    const serial = String(index + 1).padStart(4, '0')
-    const studentId = `2026${serial}`
-    return {
-      id: crypto.randomUUID(),
-      name: `${FAMILY_NAMES[index % FAMILY_NAMES.length]}${GIVEN_NAMES[(index * 7) % GIVEN_NAMES.length]}`,
-      studentId,
-      password: studentId.slice(-6),
-      avatarUrl: '',
-      chances: DEFAULT_CHANCES,
-      attemptsUsed: 0,
-      selectedAt: null,
-      contestNumber: null,
-    }
-  })
+function createAllowedStudentIds(count = 240) {
+  return Array.from({ length: count }, (_, index) => `2026${String(index + 1).padStart(4, '0')}`)
 }
 
 function seedDb() {
   return {
-    students: createSampleStudents(240),
+    allowedStudentIds: createAllowedStudentIds(),
+    drawEnabled: false,
+    students: [],
   }
 }
 
-function loadDb() {
+function normalizeDbShape(raw) {
+  if (raw && Array.isArray(raw.allowedStudentIds) && Array.isArray(raw.students)) {
+    return {
+      allowedStudentIds: [...new Set(raw.allowedStudentIds.map((item) => String(item).trim()).filter(Boolean))],
+      drawEnabled: Boolean(raw.drawEnabled),
+      students: raw.students.map(normalizeStudentRecord).filter(Boolean),
+    }
+  }
+
+  if (raw && Array.isArray(raw.students)) {
+    return {
+      allowedStudentIds: [...new Set(raw.students.map((student) => String(student.studentId ?? '').trim()).filter(Boolean))],
+      drawEnabled: false,
+      students: raw.students.map(normalizeStudentRecord).filter(Boolean),
+    }
+  }
+
+  return seedDb()
+}
+
+function normalizeStudentRecord(student) {
+  const studentId = String(student?.studentId ?? '').trim()
+  const password = String(student?.password ?? '').trim()
+  const name = String(student?.name ?? '').trim()
+
+  if (!studentId || !password || !name) {
+    return null
+  }
+
+  return {
+    id: String(student.id ?? crypto.randomUUID()),
+    name,
+    studentId,
+    password,
+    phoneNumber: String(student.phoneNumber ?? ''),
+    avatarUrl: String(student.avatarUrl ?? ''),
+    chances: Number(student.chances ?? DEFAULT_CHANCES) || DEFAULT_CHANCES,
+    attemptsUsed: Number(student.attemptsUsed ?? 0) || 0,
+    selectedAt: student.selectedAt === null || student.selectedAt === undefined ? null : Number(student.selectedAt),
+    contestNumber: student.contestNumber ? String(student.contestNumber) : null,
+    registeredAt: Number(student.registeredAt ?? Date.now()),
+  }
+}
+
+function loadDbFromDisk() {
   if (!fs.existsSync(DB_PATH)) {
     const initial = seedDb()
     fs.writeFileSync(DB_PATH, JSON.stringify(initial, null, 2))
     return initial
   }
 
-  return JSON.parse(fs.readFileSync(DB_PATH, 'utf8'))
+  const parsed = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'))
+  const normalized = normalizeDbShape(parsed)
+  fs.writeFileSync(DB_PATH, JSON.stringify(normalized, null, 2))
+  return normalized
 }
 
-function saveDb(db) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2))
+function scheduleSave() {
+  if (saveTimer !== null) {
+    clearTimeout(saveTimer)
+  }
+
+  saveTimer = setTimeout(() => {
+    saveTimer = null
+    const snapshot = JSON.stringify(db, null, 2)
+    saveInFlight = saveInFlight
+      .catch(() => undefined)
+      .then(() => fsp.writeFile(DB_PATH, snapshot))
+      .catch((error) => {
+        console.error('Failed to persist lottery data:', error)
+      })
+  }, 50)
+}
+
+function runMutation(task) {
+  const run = mutationQueue.then(async () => task())
+  mutationQueue = run.catch(() => undefined)
+  return run
 }
 
 function sanitizeStudent(student) {
   const { password, ...safe } = student
   return safe
+}
+
+function getRegisteredStudents(db) {
+  return [...db.students].sort((left, right) => left.registeredAt - right.registeredAt)
 }
 
 function getSelectedStudents(db) {
@@ -90,10 +144,16 @@ function getRemainingAttemptPool(db) {
 }
 
 function getDynamicProbability(db) {
+  const registeredCount = db.students.length
   const remainingSlots = getRemainingSlots(db)
   const remainingAttemptPool = getRemainingAttemptPool(db)
-  if (remainingSlots <= 0 || remainingAttemptPool <= 0) {
+
+  if (remainingSlots <= 0 || remainingAttemptPool <= 0 || registeredCount === 0) {
     return 0
+  }
+
+  if (registeredCount <= WINNER_TARGET) {
+    return 1
   }
 
   return Math.min(1, remainingSlots / remainingAttemptPool)
@@ -111,9 +171,22 @@ function getPublicState(db) {
       remainingSlots: getRemainingSlots(db),
       dynamicProbability: getDynamicProbability(db),
       remainingStudents: getRemainingStudents(db).length,
+      whitelistCount: db.allowedStudentIds.length,
+      drawEnabled: db.drawEnabled,
     },
     winners: getSelectedStudents(db).map(sanitizeStudent),
-    rosterPreview: db.students.slice(0, 120).map(sanitizeStudent),
+    rosterPreview: getRegisteredStudents(db).slice(0, 120).map(sanitizeStudent),
+  }
+}
+
+function getAdminState(db) {
+  return {
+    summary: getPublicState(db).summary,
+    allowedStudentIds: db.allowedStudentIds,
+    students: getRegisteredStudents(db).map((student) => ({
+      ...sanitizeStudent(student),
+      attemptsLeft: getAttemptsLeft(student),
+    })),
   }
 }
 
@@ -160,8 +233,78 @@ function requireStudent(req, res, db) {
   return student
 }
 
+function isValidPhoneNumber(phoneNumber) {
+  return /^1\d{10}$/.test(phoneNumber)
+}
+
+function validateAvatarUrl(avatarUrl) {
+  if (!avatarUrl) {
+    return true
+  }
+
+  if (avatarUrl.startsWith('data:image/')) {
+    return avatarUrl.length <= 2_500_000
+  }
+
+  try {
+    const url = new URL(avatarUrl)
+    return url.protocol === 'http:' || url.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+function registerStudent(db, payload) {
+  const studentId = String(payload.studentId ?? '').trim()
+  const password = String(payload.password ?? '').trim()
+  const name = String(payload.name ?? '').trim()
+  const phoneNumber = String(payload.phoneNumber ?? '').trim()
+  const avatarUrl = String(payload.avatarUrl ?? '').trim()
+
+  if (!studentId || !password || !name || !phoneNumber) {
+    return { error: 'Please complete all registration fields.' }
+  }
+
+  if (!db.allowedStudentIds.includes(studentId)) {
+    return { error: 'This student ID is not in the allowed registration list.' }
+  }
+
+  if (db.students.some((student) => student.studentId === studentId)) {
+    return { error: 'This student ID has already been registered.' }
+  }
+
+  if (password.length < 6) {
+    return { error: 'Password must be at least 6 characters.' }
+  }
+
+  if (!isValidPhoneNumber(phoneNumber)) {
+    return { error: 'Phone number must be an 11-digit mobile number.' }
+  }
+
+  if (!validateAvatarUrl(avatarUrl)) {
+    return { error: 'Avatar must be an image URL or an uploaded image under 2.5MB.' }
+  }
+
+  const student = {
+    id: crypto.randomUUID(),
+    name,
+    studentId,
+    password,
+    phoneNumber,
+    avatarUrl,
+    chances: DEFAULT_CHANCES,
+    attemptsUsed: 0,
+    selectedAt: null,
+    contestNumber: null,
+    registeredAt: Date.now(),
+  }
+
+  db.students.push(student)
+  return { student }
+}
+
 function drawForStudent(db, student) {
-  if (student.selectedAt !== null || getAttemptsLeft(student) <= 0 || getRemainingSlots(db) <= 0) {
+  if (!db.drawEnabled || student.selectedAt !== null || getAttemptsLeft(student) <= 0 || getRemainingSlots(db) <= 0) {
     return null
   }
 
@@ -177,7 +320,7 @@ function drawForStudent(db, student) {
       outcome: 'win',
       student: sanitizeStudent(student),
       probability,
-      message: '金光降临，恭喜你获得参赛资格。',
+      message: 'Congratulations, you have won a contest slot.',
     }
   }
 
@@ -185,58 +328,61 @@ function drawForStudent(db, student) {
     outcome: 'lose',
     student: sanitizeStudent(student),
     probability,
-    message: ENCOURAGEMENT_MESSAGES[student.attemptsUsed % ENCOURAGEMENT_MESSAGES.length],
+    message: 'Keep going. Your next draw may be the lucky one.',
   }
 }
 
 function resetDraws(db) {
   db.students = db.students.map((student) => ({
     ...student,
+    chances: DEFAULT_CHANCES,
     attemptsUsed: 0,
     selectedAt: null,
     contestNumber: null,
   }))
 }
 
-function addStudent(db, payload) {
-  const studentId = String(payload.studentId ?? '').trim()
-  const name = String(payload.name ?? '').trim()
-  const avatarUrl = String(payload.avatarUrl ?? '').trim()
-
-  if (!studentId || !name) {
-    return null
-  }
-
-  const student = {
-    id: crypto.randomUUID(),
-    name,
-    studentId,
-    password: studentId.slice(-6),
-    avatarUrl,
-    chances: DEFAULT_CHANCES,
-    attemptsUsed: 0,
-    selectedAt: null,
-    contestNumber: null,
-  }
-
-  db.students.unshift(student)
-  return sanitizeStudent(student)
+function setDrawEnabled(db, enabled) {
+  db.drawEnabled = Boolean(enabled)
 }
 
-function parseBulkInput(raw) {
-  return String(raw ?? '')
+function resetAllRegistrations(db) {
+  db.students = []
+}
+
+function setAllowedStudentIds(db, raw) {
+  const ids = String(raw ?? '')
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => {
-      const parts = line.split(/\t|,/).map((item) => item.trim())
-      return { name: parts[0] ?? '', studentId: parts[1] ?? '', avatarUrl: parts[2] ?? '' }
-    })
-    .filter((item) => item.name && item.studentId)
+
+  db.allowedStudentIds = [...new Set(ids)]
+}
+
+function updateStudentChances(db, studentId, chances) {
+  const student = db.students.find((item) => item.studentId === studentId)
+  if (!student) {
+    return { error: 'Student not found.' }
+  }
+
+  const normalized = Number(chances)
+  if (!Number.isFinite(normalized) || normalized < 0 || normalized > 999) {
+    return { error: 'Chances must be a number between 0 and 999.' }
+  }
+
+  student.chances = Math.floor(normalized)
+  student.attemptsUsed = Math.min(student.attemptsUsed, student.chances)
+
+  return {
+    student: {
+      ...sanitizeStudent(student),
+      attemptsLeft: getAttemptsLeft(student),
+    },
+  }
 }
 
 const app = express()
-app.use(express.json({ limit: '1mb' }))
+app.use(express.json({ limit: '5mb' }))
 
 app.use((_, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*')
@@ -254,12 +400,10 @@ app.get('/api/health', (_, res) => {
 })
 
 app.get('/api/public/state', (_, res) => {
-  const db = loadDb()
   res.json(getPublicState(db))
 })
 
 app.get('/api/me', (req, res) => {
-  const db = loadDb()
   const session = getSession(req)
   if (!session) {
     res.json({ role: 'guest' })
@@ -286,8 +430,30 @@ app.get('/api/me', (req, res) => {
   })
 })
 
+app.post('/api/auth/student/register', async (req, res) => {
+  await runMutation(async () => {
+    const registration = registerStudent(db, req.body)
+
+    if (registration.error) {
+      res.status(400).json({ error: registration.error, state: getPublicState(db) })
+      return
+    }
+
+    scheduleSave()
+    const token = createToken({ role: 'student', studentId: registration.student.studentId })
+    res.json({
+      token,
+      role: 'student',
+      student: {
+        ...sanitizeStudent(registration.student),
+        attemptsLeft: getAttemptsLeft(registration.student),
+      },
+      state: getPublicState(db),
+    })
+  })
+})
+
 app.post('/api/auth/student/login', (req, res) => {
-  const db = loadDb()
   const studentId = String(req.body.studentId ?? '').trim()
   const password = String(req.body.password ?? '').trim()
   const student = db.students.find((item) => item.studentId === studentId)
@@ -328,81 +494,148 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ ok: true })
 })
 
-app.post('/api/draw', (req, res) => {
-  const db = loadDb()
-  const student = requireStudent(req, res, db)
-  if (!student) {
-    return
-  }
+app.post('/api/draw', async (req, res) => {
+  await runMutation(async () => {
+    const student = requireStudent(req, res, db)
+    if (!student) {
+      return
+    }
 
-  const result = drawForStudent(db, student)
-  if (!result) {
-    res.status(400).json({ error: 'Student cannot draw right now.' })
-    return
-  }
+    if (!db.drawEnabled) {
+      res.status(400).json({ error: 'Draw has not been opened by the admin yet.' })
+      return
+    }
 
-  saveDb(db)
-  res.json({
-    result,
-    state: getPublicState(db),
-    me: {
-      role: 'student',
-      student: {
-        ...sanitizeStudent(student),
-        attemptsLeft: getAttemptsLeft(student),
+    const result = drawForStudent(db, student)
+    if (!result) {
+      res.status(400).json({ error: 'Student cannot draw right now.' })
+      return
+    }
+
+    scheduleSave()
+    res.json({
+      result,
+      state: getPublicState(db),
+      me: {
+        role: 'student',
+        student: {
+          ...sanitizeStudent(student),
+          attemptsLeft: getAttemptsLeft(student),
+        },
       },
-    },
+    })
   })
 })
 
-app.post('/api/admin/students', (req, res) => {
-  const db = loadDb()
+app.post('/api/admin/allowed-student-ids', async (req, res) => {
+  await runMutation(async () => {
+    if (!requireAdmin(req, res)) {
+      return
+    }
+
+    setAllowedStudentIds(db, req.body.raw)
+    db.students = db.students.filter((student) => db.allowedStudentIds.includes(student.studentId))
+    resetDraws(db)
+    scheduleSave()
+
+    res.json({
+      state: getPublicState(db),
+      allowedStudentIds: db.allowedStudentIds,
+    })
+  })
+})
+
+app.get('/api/admin/allowed-student-ids', (req, res) => {
   if (!requireAdmin(req, res)) {
     return
   }
 
-  const added = addStudent(db, req.body)
-  if (!added) {
-    res.status(400).json({ error: 'Invalid student payload.' })
-    return
-  }
-
-  saveDb(db)
-  res.json({ student: added, state: getPublicState(db) })
+  res.json({ allowedStudentIds: db.allowedStudentIds })
 })
 
-app.post('/api/admin/bulk-import', (req, res) => {
-  const db = loadDb()
+app.get('/api/admin/state', (req, res) => {
   if (!requireAdmin(req, res)) {
     return
   }
 
-  const rows = parseBulkInput(req.body.raw)
-  const students = rows.map((item) => addStudent(db, item)).filter(Boolean)
-  saveDb(db)
-  res.json({ count: students.length, state: getPublicState(db) })
+  res.json(getAdminState(db))
 })
 
-app.post('/api/admin/seed', (req, res) => {
-  if (!requireAdmin(req, res)) {
-    return
-  }
+app.post('/api/admin/draw-toggle', async (req, res) => {
+  await runMutation(async () => {
+    if (!requireAdmin(req, res)) {
+      return
+    }
 
-  const db = { students: createSampleStudents(240) }
-  saveDb(db)
-  res.json({ state: getPublicState(db) })
+    setDrawEnabled(db, req.body.enabled)
+    scheduleSave()
+    res.json(getAdminState(db))
+  })
 })
 
-app.post('/api/admin/reset', (req, res) => {
-  const db = loadDb()
-  if (!requireAdmin(req, res)) {
-    return
-  }
+app.post('/api/admin/students/chances', async (req, res) => {
+  await runMutation(async () => {
+    if (!requireAdmin(req, res)) {
+      return
+    }
 
-  resetDraws(db)
-  saveDb(db)
-  res.json({ state: getPublicState(db) })
+    const studentId = String(req.body.studentId ?? '').trim()
+    const chances = req.body.chances
+    const result = updateStudentChances(db, studentId, chances)
+
+    if (result.error) {
+      res.status(400).json({ error: result.error })
+      return
+    }
+
+    scheduleSave()
+    res.json({
+      student: result.student,
+      state: getAdminState(db),
+    })
+  })
 })
+
+app.post('/api/admin/seed', async (req, res) => {
+  await runMutation(async () => {
+    if (!requireAdmin(req, res)) {
+      return
+    }
+
+    db = seedDb()
+    scheduleSave()
+    res.json({
+      state: getPublicState(db),
+      allowedStudentIds: db.allowedStudentIds,
+    })
+  })
+})
+
+app.post('/api/admin/reset', async (req, res) => {
+  await runMutation(async () => {
+    if (!requireAdmin(req, res)) {
+      return
+    }
+
+    resetDraws(db)
+    scheduleSave()
+    res.json({ state: getPublicState(db) })
+  })
+})
+
+app.post('/api/admin/reset-registrations', async (req, res) => {
+  await runMutation(async () => {
+    if (!requireAdmin(req, res)) {
+      return
+    }
+
+    resetAllRegistrations(db)
+    scheduleSave()
+    res.json({ state: getPublicState(db) })
+  })
+})
+
+db = loadDbFromDisk()
 
 app.listen(PORT, () => {
   console.log(`Lottery server running at http://127.0.0.1:${PORT}`)
