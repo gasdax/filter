@@ -18,9 +18,3 @@ export type DrawResult = {
   probability: number
   message: string
 }
-
-export type AppState = {
-  students: Student[]
-  lastWinnerId: string | null
-  currentStudentId: string | null
-}

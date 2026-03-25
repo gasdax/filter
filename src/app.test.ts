@@ -20,6 +20,7 @@ function createFetchMock() {
     summary: {
       totalStudents: 1,
       selectedCount: 0,
+      winnerTarget: 35,
       remainingSlots: 35,
       dynamicProbability: 1,
       remainingStudents: 1,
@@ -95,6 +96,10 @@ function createFetchMock() {
 
     if (url === '/api/admin/students/chances' && method === 'POST') {
       return new Response(JSON.stringify({ state: adminState, student }), { status: 200 })
+    }
+
+    if (url === '/api/admin/winner-target' && method === 'POST') {
+      return new Response(JSON.stringify(adminState), { status: 200 })
     }
 
     return new Response(JSON.stringify({ error: 'Unhandled request' }), { status: 500 })

@@ -10,9 +10,20 @@ const __dirname = path.dirname(__filename)
 
 const DB_PATH = path.join(__dirname, 'server-db.json')
 const PORT = 4174
-const WINNER_TARGET = 35
+const DEFAULT_WINNER_TARGET = 35
 const DEFAULT_CHANCES = 20
 const ADMIN_PASSWORD = 'admin2026'
+const WIN_MESSAGES = [
+  '恭喜你成功中签，舞台正在为你点亮。',
+  '好运降临，恭喜你拿到了本次中签名额。',
+  '这一抽梦想成真，恭喜你成功入选。',
+]
+const LOSE_MESSAGES = [
+  '别灰心，幸运可能就在下一次转角等你。',
+  '这次先蓄力，下一抽继续发光。',
+  '保持好手气，下一次也许就是你的高光时刻。',
+  '离幸运又近了一步，继续加油。',
+]
 
 const sessions = new Map()
 let db = null
@@ -28,6 +39,7 @@ function seedDb() {
   return {
     allowedStudentIds: createAllowedStudentIds(),
     drawEnabled: false,
+    winnerTarget: DEFAULT_WINNER_TARGET,
     students: [],
   }
 }
@@ -37,6 +49,7 @@ function normalizeDbShape(raw) {
     return {
       allowedStudentIds: [...new Set(raw.allowedStudentIds.map((item) => String(item).trim()).filter(Boolean))],
       drawEnabled: Boolean(raw.drawEnabled),
+      winnerTarget: normalizeWinnerTarget(raw.winnerTarget),
       students: raw.students.map(normalizeStudentRecord).filter(Boolean),
     }
   }
@@ -45,6 +58,7 @@ function normalizeDbShape(raw) {
     return {
       allowedStudentIds: [...new Set(raw.students.map((student) => String(student.studentId ?? '').trim()).filter(Boolean))],
       drawEnabled: false,
+      winnerTarget: DEFAULT_WINNER_TARGET,
       students: raw.students.map(normalizeStudentRecord).filter(Boolean),
     }
   }
@@ -135,8 +149,21 @@ function getAttemptsLeft(student) {
   return Math.max(0, student.chances - student.attemptsUsed)
 }
 
+function pickRandomMessage(messages) {
+  return messages[Math.floor(Math.random() * messages.length)]
+}
+
+function normalizeWinnerTarget(value) {
+  const normalized = Number(value)
+  if (!Number.isFinite(normalized) || normalized < 1) {
+    return DEFAULT_WINNER_TARGET
+  }
+
+  return Math.floor(normalized)
+}
+
 function getRemainingSlots(db) {
-  return Math.max(0, WINNER_TARGET - getSelectedStudents(db).length)
+  return Math.max(0, db.winnerTarget - getSelectedStudents(db).length)
 }
 
 function getRemainingAttemptPool(db) {
@@ -152,7 +179,7 @@ function getDynamicProbability(db) {
     return 0
   }
 
-  if (registeredCount <= WINNER_TARGET) {
+  if (registeredCount <= db.winnerTarget) {
     return 1
   }
 
@@ -168,6 +195,7 @@ function getPublicState(db) {
     summary: {
       totalStudents: db.students.length,
       selectedCount: getSelectedStudents(db).length,
+      winnerTarget: db.winnerTarget,
       remainingSlots: getRemainingSlots(db),
       dynamicProbability: getDynamicProbability(db),
       remainingStudents: getRemainingStudents(db).length,
@@ -320,7 +348,7 @@ function drawForStudent(db, student) {
       outcome: 'win',
       student: sanitizeStudent(student),
       probability,
-      message: 'Congratulations, you have won a contest slot.',
+      message: pickRandomMessage(WIN_MESSAGES),
     }
   }
 
@@ -328,7 +356,7 @@ function drawForStudent(db, student) {
     outcome: 'lose',
     student: sanitizeStudent(student),
     probability,
-    message: 'Keep going. Your next draw may be the lucky one.',
+    message: pickRandomMessage(LOSE_MESSAGES),
   }
 }
 
@@ -344,6 +372,23 @@ function resetDraws(db) {
 
 function setDrawEnabled(db, enabled) {
   db.drawEnabled = Boolean(enabled)
+}
+
+function updateWinnerTarget(db, winnerTarget) {
+  const normalized = Number(winnerTarget)
+  const selectedCount = getSelectedStudents(db).length
+
+  if (!Number.isFinite(normalized) || normalized < 1 || normalized > 999) {
+    return { error: 'Winner target must be a number between 1 and 999.' }
+  }
+
+  const nextTarget = Math.floor(normalized)
+  if (nextTarget < selectedCount) {
+    return { error: `Winner target cannot be less than the current selected count (${selectedCount}).` }
+  }
+
+  db.winnerTarget = nextTarget
+  return { ok: true }
 }
 
 function resetAllRegistrations(db) {
@@ -593,6 +638,23 @@ app.post('/api/admin/students/chances', async (req, res) => {
       student: result.student,
       state: getAdminState(db),
     })
+  })
+})
+
+app.post('/api/admin/winner-target', async (req, res) => {
+  await runMutation(async () => {
+    if (!requireAdmin(req, res)) {
+      return
+    }
+
+    const result = updateWinnerTarget(db, req.body.winnerTarget)
+    if (result.error) {
+      res.status(400).json({ error: result.error })
+      return
+    }
+
+    scheduleSave()
+    res.json(getAdminState(db))
   })
 })
 

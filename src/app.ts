@@ -6,6 +6,7 @@ import type { DrawResult, Student } from './types'
 type Summary = {
   totalStudents: number
   selectedCount: number
+  winnerTarget: number
   remainingSlots: number
   dynamicProbability: number
   remainingStudents: number
@@ -54,10 +55,12 @@ const AUTH_KEY = 'student-lottery-auth-token'
 let refreshTimer: number | null = null
 
 export function initApp(root: HTMLElement): void {
+  let hasRendered = false
   let publicState: PublicState = {
     summary: {
       totalStudents: 0,
       selectedCount: 0,
+      winnerTarget: 35,
       remainingSlots: 35,
       dynamicProbability: 0,
       remainingStudents: 0,
@@ -91,6 +94,7 @@ export function initApp(root: HTMLElement): void {
   let registerAvatarName = ''
   let adminPasswordDraft = ''
   let allowedIdsDraft = ''
+  let winnerTargetDraft = ''
   let chancesDrafts: Record<string, string> = {}
 
   void bootstrap()
@@ -109,11 +113,12 @@ export function initApp(root: HTMLElement): void {
   }
 
   async function bootstrap(): Promise<void> {
-    await refreshPublicAndSession()
-    render()
+    await refreshPublicAndSession(true)
   }
 
-  async function refreshPublicAndSession(): Promise<void> {
+  async function refreshPublicAndSession(forceRender = false): Promise<void> {
+    const previousRenderState = createRenderStateSignature()
+
     try {
       loading = true
       const [nextPublicState, me] = await Promise.all([
@@ -143,7 +148,8 @@ export function initApp(root: HTMLElement): void {
       errorMessage = getErrorMessage(error)
     } finally {
       loading = false
-      if (overlayState.mode === 'idle' && !suspendPollingRender) {
+      const nextRenderState = createRenderStateSignature()
+      if (overlayState.mode === 'idle' && !suspendPollingRender && (forceRender || !hasRendered || previousRenderState !== nextRenderState)) {
         render()
       }
     }
@@ -156,6 +162,7 @@ export function initApp(root: HTMLElement): void {
 
     adminState = await apiGet<AdminState>('/api/admin/state', session.token)
     allowedIdsDraft = adminState.allowedStudentIds.join('\n')
+    winnerTargetDraft = String(adminState.summary.winnerTarget)
     chancesDrafts = Object.fromEntries(adminState.students.map((student) => [student.studentId, String(student.chances)]))
   }
 
@@ -166,6 +173,40 @@ export function initApp(root: HTMLElement): void {
 
     const hue = [...student.studentId].reduce((sum, char) => sum + char.charCodeAt(0), 0) % 360
     return `<div class="avatar-fallback" style="--avatar-hue:${hue}" aria-label="${escapeHtml(student.name)}">${escapeHtml(student.name.slice(0, 2))}</div>`
+  }
+
+  function renderWinnerTicker(): string {
+    if (!publicState.winners.length) {
+      return `
+        <section class="winner-ticker panel" aria-label="Winner list ticker">
+          <div class="winner-ticker-label">中奖名单</div>
+          <div class="winner-ticker-empty">当前还没有中奖学生，名单将在这里实时滚动展示。</div>
+        </section>
+      `
+    }
+
+    const tickerItems = publicState.winners
+      .map((winner) => `
+        <span class="winner-ticker-item">
+          <span class="winner-ticker-avatar">${buildAvatar(winner)}</span>
+          <strong>${escapeHtml(winner.name)}</strong>
+          <span>${escapeHtml(winner.studentId)}</span>
+          <em>${escapeHtml(winner.contestNumber ?? '')}</em>
+        </span>
+      `)
+      .join('')
+
+    return `
+      <section class="winner-ticker panel" aria-label="Winner list ticker">
+        <div class="winner-ticker-label">中奖名单</div>
+        <div class="winner-ticker-marquee">
+          <div class="winner-ticker-track">
+            ${tickerItems}
+            ${tickerItems}
+          </div>
+        </div>
+      </section>
+    `
   }
 
   function renderOverlay(currentStudent: StudentSession | null): string {
@@ -182,7 +223,7 @@ export function initApp(root: HTMLElement): void {
               <div class="overlay-avatar">${buildAvatar(overlayState.result.student)}</div>
               <p class="overlay-badge">恭喜中签</p>
               <h2 data-testid="winner-name">${escapeHtml(overlayState.result.student.name)}</h2>
-              <p>${escapeHtml(overlayState.result.student.studentId)}</p>
+              <p class="overlay-student-id">${escapeHtml(overlayState.result.student.studentId)}</p>
               <p class="overlay-number">${escapeHtml(overlayState.result.student.contestNumber ?? '')}</p>
             </div>
           </div>
@@ -198,7 +239,7 @@ export function initApp(root: HTMLElement): void {
             <div class="overlay-encourage-inner">
               <p class="overlay-badge">本次未中签</p>
               <h2>继续加油</h2>
-              <p>${escapeHtml(overlayState.result.message)}</p>
+              <p class="overlay-encourage-message">${escapeHtml(overlayState.result.message)}</p>
               <strong>剩余抽奖次数 ${currentStudent?.attemptsLeft ?? 0}</strong>
             </div>
           </div>
@@ -212,10 +253,11 @@ export function initApp(root: HTMLElement): void {
   function renderStudentRegister(): string {
     return `
       <div class="register-page">
+        ${renderWinnerTicker()}
         <section class="register-hero panel">
           <div>
             <p class="eyebrow">学生注册入口</p>
-            <h1>星辉参赛祈愿</h1>
+            <h1 class="hero-title">星辉参赛祈愿</h1>
             <p class="hero-desc">请先完成注册。只有后台白名单中的学号才允许注册，注册成功后也需要管理员开放抽奖才能参与。</p>
             <div class="stats-grid compact-stats">
               <article class="stat-card"><span class="stat-label">已注册人数</span><strong class="stat-value" data-testid="total-count">${publicState.summary.totalStudents}</strong></article>
@@ -259,7 +301,7 @@ export function initApp(root: HTMLElement): void {
       <div class="register-page">
         <section class="register-result-shell panel">
           <p class="eyebrow">学生登录</p>
-          <h1>进入抽奖主页</h1>
+          <h1 class="hero-title">进入抽奖主页</h1>
           <p class="hero-desc">学生登录后可进入抽奖页面。若管理员尚未开放抽奖，页面会明确提示。</p>
           ${errorMessage ? `<p class="error-banner">${escapeHtml(errorMessage)}</p>` : ''}
           <form class="single-form" data-role="student-login-form">
@@ -284,7 +326,7 @@ export function initApp(root: HTMLElement): void {
       <div class="register-page">
         <section class="register-result-shell panel ${registerResult.status === 'success' ? 'is-success' : 'is-fail'}">
           <p class="eyebrow">${registerResult.status === 'success' ? '注册成功' : '注册失败'}</p>
-          <h1>${escapeHtml(registerResult.title)}</h1>
+          <h1 class="hero-title">${escapeHtml(registerResult.title)}</h1>
           <p class="hero-desc">${escapeHtml(registerResult.detail)}</p>
           <div class="inline-actions">
             ${registerResult.status === 'success' ? '<button type="button" class="action action-primary" data-role="goto-student-dashboard">进入抽奖主页</button>' : ''}
@@ -300,7 +342,7 @@ export function initApp(root: HTMLElement): void {
       <div class="register-page">
         <section class="register-result-shell panel">
           <p class="eyebrow">管理员入口</p>
-          <h1>后台管理登录</h1>
+          <h1 class="hero-title">后台管理登录</h1>
           <p class="hero-desc">当前后台入口地址为 /admin。登录后可导入白名单、管理已注册用户、调整抽奖次数，并控制是否开放抽奖。</p>
           ${errorMessage ? `<p class="error-banner">${escapeHtml(errorMessage)}</p>` : ''}
           <form class="single-form" data-role="admin-login-form">
@@ -325,10 +367,11 @@ export function initApp(root: HTMLElement): void {
       overlayState.mode === 'idle'
 
     return `
+      ${renderWinnerTicker()}
       <header class="hero-panel">
         <div class="hero-copy">
           <p class="eyebrow">多人在线抽签</p>
-          <h1>星辉参赛祈愿</h1>
+          <h1 class="hero-title">星辉参赛祈愿</h1>
           <p class="hero-desc">学生注册完成后，需要管理员先开放抽奖，才能正式开始抽签。</p>
           ${errorMessage ? `<p class="error-banner">${escapeHtml(errorMessage)}</p>` : ''}
         </div>
@@ -403,7 +446,7 @@ export function initApp(root: HTMLElement): void {
         <header class="hero-panel">
           <div class="hero-copy">
             <p class="eyebrow">管理员后台</p>
-            <h1>注册与抽奖管理</h1>
+            <h1 class="hero-title">注册与抽奖管理</h1>
             <p class="hero-desc">通过 /admin 进入后台。你可以管理白名单、查看注册用户、调整抽奖次数，并决定是否开放抽奖。</p>
             ${errorMessage ? `<p class="error-banner">${escapeHtml(errorMessage)}</p>` : ''}
           </div>
@@ -411,7 +454,7 @@ export function initApp(root: HTMLElement): void {
             <article class="stat-card"><span class="stat-label">白名单人数</span><strong class="stat-value">${adminState.summary.whitelistCount}</strong></article>
             <article class="stat-card"><span class="stat-label">已注册人数</span><strong class="stat-value">${adminState.summary.totalStudents}</strong></article>
             <article class="stat-card"><span class="stat-label">已中签人数</span><strong class="stat-value">${adminState.summary.selectedCount}</strong></article>
-            <article class="stat-card"><span class="stat-label">抽奖状态</span><strong class="stat-value">${adminState.summary.drawEnabled ? '已开放' : '未开放'}</strong></article>
+            <article class="stat-card"><span class="stat-label">中签名额</span><strong class="stat-value">${adminState.summary.winnerTarget}</strong></article>
           </div>
         </header>
         <main class="main-grid">
@@ -421,6 +464,13 @@ export function initApp(root: HTMLElement): void {
               <p>每行一个学号保存白名单。开放抽奖前，学生即使注册并登录，也无法开始抽签。</p>
             </div>
             <div class="bulk-import">
+              <label>
+                <span>中签人数</span>
+                <input data-role="winner-target-input" inputmode="numeric" value="${escapeHtml(winnerTargetDraft)}" placeholder="请输入中签人数" />
+              </label>
+              <div class="inline-actions">
+                <button type="button" class="action" data-role="save-winner-target">保存中签名额</button>
+              </div>
               <label for="allowed-ids-input">白名单学号清单</label>
               <textarea id="allowed-ids-input" data-role="allowed-ids-input" placeholder="每行一个学号">${escapeHtml(allowedIdsDraft)}</textarea>
               <div class="inline-actions">
@@ -483,12 +533,37 @@ export function initApp(root: HTMLElement): void {
 
     root.innerHTML = `
       <div class="app-shell ${compactShell ? 'is-register-flow' : ''}">
+        <div class="bg-decor" aria-hidden="true">
+          <span class="bg-orb bg-orb-a"></span>
+          <span class="bg-orb bg-orb-b"></span>
+          <span class="bg-orb bg-orb-c"></span>
+          <span class="bg-grid"></span>
+          <span class="bg-particle bg-particle-a"></span>
+          <span class="bg-particle bg-particle-b"></span>
+          <span class="bg-particle bg-particle-c"></span>
+        </div>
         ${renderOverlay(currentStudent)}
         ${content}
       </div>
     `
 
+    hasRendered = true
     bindEvents()
+  }
+
+  function createRenderStateSignature(): string {
+    return JSON.stringify({
+      screen,
+      session,
+      publicState,
+      adminSummary: adminState.summary,
+      overlayState,
+      registerResult,
+      lastDraw,
+      errorMessage,
+      loading,
+      pathname: window.location.pathname,
+    })
   }
 
   function bindInputTracking(input: HTMLInputElement | HTMLTextAreaElement | null, onInput: () => void): void {
@@ -498,7 +573,6 @@ export function initApp(root: HTMLElement): void {
     })
     input?.addEventListener('blur', () => {
       suspendPollingRender = false
-      render()
     })
   }
 
@@ -515,6 +589,7 @@ export function initApp(root: HTMLElement): void {
     const drawButton = root.querySelector<HTMLButtonElement>('[data-role="draw-once"]')
     const refreshButton = root.querySelector<HTMLButtonElement>('[data-role="refresh-state"]')
     const saveAllowedIdsButton = root.querySelector<HTMLButtonElement>('[data-role="save-allowed-ids"]')
+    const saveWinnerTargetButton = root.querySelector<HTMLButtonElement>('[data-role="save-winner-target"]')
     const seedButton = root.querySelector<HTMLButtonElement>('[data-role="seed-demo"]')
     const resetButton = root.querySelector<HTMLButtonElement>('[data-role="reset-draws"]')
     const resetRegistrationsButton = root.querySelector<HTMLButtonElement>('[data-role="reset-registrations"]')
@@ -530,6 +605,7 @@ export function initApp(root: HTMLElement): void {
     const loginStudentIdInput = root.querySelector<HTMLInputElement>('input[name="loginStudentId"]')
     const loginPasswordInput = root.querySelector<HTMLInputElement>('input[name="loginPassword"]')
     const adminPasswordInput = root.querySelector<HTMLInputElement>('input[name="adminPassword"]')
+    const winnerTargetInput = root.querySelector<HTMLInputElement>('[data-role="winner-target-input"]')
     const allowedIdsInput = root.querySelector<HTMLTextAreaElement>('[data-role="allowed-ids-input"]')
     const chancesInputs = root.querySelectorAll<HTMLInputElement>('[data-role="student-chances-input"]')
     const saveChancesButtons = root.querySelectorAll<HTMLButtonElement>('[data-role="save-student-chances"]')
@@ -541,6 +617,7 @@ export function initApp(root: HTMLElement): void {
     bindInputTracking(loginStudentIdInput, () => { studentIdDraft = loginStudentIdInput?.value ?? '' })
     bindInputTracking(loginPasswordInput, () => { studentPasswordDraft = loginPasswordInput?.value ?? '' })
     bindInputTracking(adminPasswordInput, () => { adminPasswordDraft = adminPasswordInput?.value ?? '' })
+    bindInputTracking(winnerTargetInput, () => { winnerTargetDraft = winnerTargetInput?.value ?? '' })
     bindInputTracking(allowedIdsInput, () => { allowedIdsDraft = allowedIdsInput?.value ?? '' })
     chancesInputs.forEach((input) => bindInputTracking(input, () => { chancesDrafts[input.dataset.studentId ?? ''] = input.value }))
 
@@ -636,7 +713,7 @@ export function initApp(root: HTMLElement): void {
         registerResult = { status: 'idle' }
         screen = 'student-dashboard'
         errorMessage = ''
-        await refreshPublicAndSession()
+        await refreshPublicAndSession(true)
       } catch (error) {
         errorMessage = getErrorMessage(error)
         render()
@@ -687,7 +764,7 @@ export function initApp(root: HTMLElement): void {
     })
 
     refreshButton?.addEventListener('click', () => {
-      void refreshPublicAndSession()
+      void refreshPublicAndSession(true)
     })
 
     saveAllowedIdsButton?.addEventListener('click', async () => {
@@ -695,6 +772,21 @@ export function initApp(root: HTMLElement): void {
       try {
         await apiPost('/api/admin/allowed-student-ids', { raw: allowedIdsDraft }, session.token)
         await refreshAdminState()
+        errorMessage = ''
+        render()
+      } catch (error) {
+        errorMessage = getErrorMessage(error)
+        render()
+      }
+    })
+
+    saveWinnerTargetButton?.addEventListener('click', async () => {
+      if (session.role !== 'admin') return
+      try {
+        adminState = await apiPost<AdminState>('/api/admin/winner-target', { winnerTarget: winnerTargetDraft }, session.token)
+        winnerTargetDraft = String(adminState.summary.winnerTarget)
+        allowedIdsDraft = adminState.allowedStudentIds.join('\n')
+        chancesDrafts = Object.fromEntries(adminState.students.map((student) => [student.studentId, String(student.chances)]))
         errorMessage = ''
         render()
       } catch (error) {
@@ -812,7 +904,7 @@ export function initApp(root: HTMLElement): void {
     lastDraw = null
     window.history.pushState({}, '', pathname)
     screen = pathname === '/admin' ? 'admin-login' : 'student-register'
-    await refreshPublicAndSession()
+    await refreshPublicAndSession(true)
   }
 }
 
